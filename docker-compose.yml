@@ -1,0 +1,84 @@
+# version: '3.8'
+
+services:
+  # 1. Vector Database for RAG & Tenant Namespace Isolation
+  qdrant:
+    image: qdrant/qdrant:v1.9.0
+    container_name: fixmaster-qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    restart: unless-stopped
+    # healthcheck:
+    #   test: ["CMD", "curl", "-f", "http://localhost:6333/health"]
+    #   interval: 5s
+    #   timeout: 3s
+    #   retries: 5
+
+  # 2. Message Broker for Celery Async Tasks
+  redis:
+    image: redis:7-alpine
+    container_name: fixmaster-redis
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # 3. Isolated Sandbox for Patch Verification (Docker-in-Docker)
+  dind-sandbox:
+    image: docker:24.0-dind
+    container_name: fixmaster-sandbox
+    privileged: true # Required for running containers inside containers safely
+    environment:
+      DOCKER_TLS_CERTDIR: "" # Disabling TLS for internal loopback simplicity
+    volumes:
+      - dind_data:/var/lib/docker
+    restart: unless-stopped
+
+  # 4. FastAPI Webhook Listener & API Gateway
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: fixmaster-api
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/code
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - QDRANT_URL=http://qdrant:6333
+      - DOCKER_HOST=tcp://dind-sandbox:2375 # Connects Python application to the DinD daemon
+    depends_on:
+      - redis
+      - qdrant
+    restart: unless-stopped
+
+  # 5. Background Worker to execute long-running Agent loops and validation tasks
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: fixmaster-worker
+    command: celery -A app.worker.celery_app worker --loglevel=info
+    volumes:
+      - .:/code
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - QDRANT_URL=http://qdrant:6333
+      - DOCKER_HOST=tcp://dind-sandbox:2375
+    depends_on:
+      - redis
+      - dind-sandbox
+    restart: unless-stopped
+
+volumes:
+  qdrant_data:
+  dind_data:
