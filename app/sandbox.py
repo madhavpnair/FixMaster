@@ -22,9 +22,11 @@ def run_code_in_sandbox(repo_url: str, command: str) -> dict:
         """
 
         # Run the container
+        # mounted the shared /workspace volume so the worker can read the files later
         container = client.containers.run(
             image="python:3.11", 
             command=["/bin/sh", "-c", bash_script],
+            volumes={'/workspace': {'bind': '/workspace', 'mode': 'rw'}},
             detach=True,                            
             remove=False,                           
             network_mode="bridge"                   

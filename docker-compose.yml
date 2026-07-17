@@ -39,6 +39,7 @@ services:
       DOCKER_TLS_CERTDIR: "" # Disabling TLS for internal loopback simplicity
     volumes:
       - dind_data:/var/lib/docker
+      - repo_workspace:/workspace
     restart: unless-stopped
 
   # 4. FastAPI Webhook Listener & API Gateway
@@ -52,6 +53,7 @@ services:
       - "8000:8000"
     volumes:
       - .:/code
+      - repo_workspace:/workspace
     environment:
       - REDIS_URL=redis://redis:6379/0
       - QDRANT_URL=http://qdrant:6333
@@ -82,3 +84,4 @@ services:
 volumes:
   qdrant_data:
   dind_data:
+  repo_workspace:
