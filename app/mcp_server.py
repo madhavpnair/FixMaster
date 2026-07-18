@@ -51,4 +51,5 @@ def list_directory(path: str = ".") -> str:
 if __name__ == "__main__":
     # When run directly, this starts the server listening for requests from the AI Agent
     print("[MCP Server] Starting up. Awaiting Agent connections...")
-    mcp.run()
+    # LangChain will use stdio
+    mcp.run(transport="stdio")
