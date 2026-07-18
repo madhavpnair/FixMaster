@@ -76,7 +76,7 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - QDRANT_URL=http://qdrant:6333
       - DOCKER_HOST=tcp://dind-sandbox:2375
-    depends_on:
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
       - redis
       - dind-sandbox
     restart: unless-stopped
