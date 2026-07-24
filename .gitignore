@@ -223,5 +223,11 @@ __marimo__/
 knownbugsandtodo.md
 notes.md
 
+
+# these are kept in HF
+
 # model weights and lora adapters after training
 fixmaster-lora-v1/
+
+# processed data
+processed_data/
