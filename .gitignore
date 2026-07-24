@@ -222,3 +222,6 @@ __marimo__/
 # custom markdown files
 knownbugsandtodo.md
 notes.md
+
+# model weights and lora adapters after training
+fixmaster-lora-v1/
