@@ -5,5 +5,5 @@
 
 
 ## Hugging Face Details
-Fine-tuned models and Processed Dataset used for training : https://huggingface.co/madhavpnair
+The fine-tuned models and processed datasets used for training are available on the [Hugging Face Profile](https://huggingface.co/madhavpnair)
 
