@@ -1,0 +1,3 @@
+- mcp server to be expanded
+    - more tools to be added
+    - git_diff(), blame etc.
