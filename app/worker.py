@@ -1,133 +1,136 @@
 import os
-import asyncio
+import torch
 from celery import Celery
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import PeftModel
+from qdrant_client import QdrantClient
+
+# Import your sandbox function
 from app.sandbox import run_code_in_sandbox
 
-
-# LangChain and MCP Imports
-from langchain_core.messages import HumanMessage
-from langchain_mcp_adapters.client import MultiServerMCPClient
-from langgraph.prebuilt import create_react_agent
-from langchain_google_genai import ChatGoogleGenerativeAI 
-
-
-# Pull connection string from docker-compose.yml
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
+celery_app = Celery("patchpilot_worker", broker=REDIS_URL, backend=REDIS_URL)
 
-# Initialize Celery
-celery_app = Celery("fixmaster_worker", broker=REDIS_URL, backend=REDIS_URL)
+QDRANT_URL = os.getenv("QDRANT_URL", "http://qdrant:6333")
+qdrant_client = QdrantClient(url=QDRANT_URL)
+COLLECTION_NAME = "global_threat_db"
 
-celery_app.conf.update(
-    task_serializer="json",
-    accept_content=["json"],
-    result_serializer="json",
-    timezone="UTC",
-    enable_utc=True,
-)
+WORKSPACE_DIR = "/workspace"
 
+# Lazy-load variables to save RAM on startup
+encoder = None
+llm_model = None
+llm_tokenizer = None
 
-async def run_ai_agent(error_logs: str):
-    """
-    Starts the MCP Client, connects to our MCP Server, and asks the LLM to fix the bug.
-    """
-    print("[Agent] Connecting to MCP Server...")
-    
-    # Configure the MCP Client to start our local server via standard input/output
-    mcp_config = {
-        "repo_tools": {
-            "command": "python",
-            "args": ["app/mcp_server.py"], # This points to the file we just created
-            "transport": "stdio",
-        }
-    }
-    
-
-    client = MultiServerMCPClient(mcp_config)
-    print("[Agent] Fetching tools from MCP Server...")
-    tools = await client.get_tools()
+def load_local_llm():
+    """Loads the base model and attaches your custom LoRA weights."""
+    global llm_model, llm_tokenizer
+    if llm_model is None:
+        print("[LLM] Loading Base Model (Qwen 1.5B) and your custom LoRA adapters...")
         
-    # Initialize the LLM (You will need to set OPENAI_API_KEY or use a local model)
-    # Note: We are using a fast model here for testing.
-    llm = ChatGoogleGenerativeAI(
-            model="gemini-1.5-flash-latest",
-            google_api_key=os.getenv("GOOGLE_API_KEY"),
-            api_version="v1",
-            temperature=0
+        base_model_id = "Qwen/Qwen2.5-Coder-1.5B"
+        # This path must match where you unzipped your folder!
+        adapter_path = "/code/fixmaster-lora-v1" 
+
+        llm_tokenizer = AutoTokenizer.from_pretrained(base_model_id)
+        
+        # Load the base model in float16 to keep RAM usage manageable for Docker
+        base_model = AutoModelForCausalLM.from_pretrained(
+            base_model_id, 
+            torch_dtype=torch.float16, 
+            device_map="auto" # Automatically uses GPU if available, else falls back to CPU
         )
-    
-    # Bind tools to the model
-    # llm_with_tools = llm.bind_tools(tools)
+        
+        # Attach YOUR trained weights!
+        llm_model = PeftModel.from_pretrained(base_model, adapter_path)
+        print("[LLM] Sovereign AI successfully loaded into memory!")
 
-    # 2. Define the System Prompt to give the AI "tools" via instructions
-    system_prompt = """
-    You are an AI SRE. You have access to these tools:
-    - list_directory(path: str): Lists files.
-    - read_file(filepath: str): Reads content of a file.
-    
-    The user will provide a build error log. You must investigate the repo to find the issue.
-    Explain the bug and provide the fix.
-    """
-    
-    # 3. Analyze logs
-    prompt = f"{system_prompt}\n\nBuild failure logs:\n{error_logs}\n\nWhat is the bug?"
-    
-    # 4. Invoke LLM
-    response = await llm.ainvoke([HumanMessage(content=prompt)])
-    
+def retrieve_rag_context(error_logs: str) -> str:
+    global encoder
+    if encoder is None:
+        from sentence_transformers import SentenceTransformer
+        encoder = SentenceTransformer("all-MiniLM-L6-v2")
+        
+    try:
+        query_vector = encoder.encode(error_logs[:500]).tolist()
+        search_result = qdrant_client.search(
+            collection_name=COLLECTION_NAME,
+            query_vector=query_vector,
+            limit=1 
+        )
+        
+        if search_result:
+            best_match = search_result[0].payload
+            return f"Remediation Advice: {best_match.get('remediation', 'None')}"
+        return "No relevant security context found."
+    except Exception:
+        return "Warning: RAG Retrieval failed."
 
-    # print(f"DEBUG: API Key exists: {bool(os.getenv('GOOGLE_API_KEY'))}")
+def read_workspace_files() -> str:
+    workspace_content = ""
+    if os.path.exists(WORKSPACE_DIR):
+        for root, _, files in os.walk(WORKSPACE_DIR):
+            for file in files:
+                if file.endswith((".py", ".txt", ".md", ".json")):
+                    filepath = os.path.join(root, file)
+                    try:
+                        with open(filepath, 'r', encoding='utf-8') as f:
+                            workspace_content += f"\n--- {file} ---\n{f.read()}\n"
+                    except Exception:
+                        pass
+    return workspace_content or "No readable files found."
+
+def run_ai_agent(error_logs: str):
+    print("[Agent] Initializing Local Sovereign Agent...")
     
+    rag_context = retrieve_rag_context(error_logs)
+    code_context = read_workspace_files()
+
+    # Load your model into memory!
+    load_local_llm()
     
-    # Create the LangGraph agent equipped with our MCP tools
-    # agent = create_react_agent(llm_with_tools, tools)
+    # Format the prompt EXACTLY how we trained it in Colab
+    prompt = f"""<|im_start|>system
+You are PatchPilot, an autonomous security remediation agent. Given an error log and buggy code, output ONLY the unified Git patch. Do not output conversational text.<|im_end|>
+<|im_start|>user
+Error: {error_logs}
+Code Context: {code_context}
+Database Context: {rag_context}<|im_end|>
+<|im_start|>assistant
+```diff\n"""
+
+    print("[Agent] Generating deterministic Git patch...")
     
-    # print("[Agent] Analyzing error logs...")
-    # prompt = f"""
-    # A build failure occurred in our repository. 
-    # Here are the compiler/execution logs:
+    inputs = llm_tokenizer(prompt, return_tensors="pt").to(llm_model.device)
     
-    # <logs>
-    # {error_logs}
-    # </logs>
+    # Generate the patch (temperature=0.1 prevents hallucination)
+    outputs = llm_model.generate(
+        **inputs, 
+        max_new_tokens=256, 
+        temperature=0.1,
+        pad_token_id=llm_tokenizer.eos_token_id
+    )
     
-    # Please use your tools to investigate the repository files, find the bug, and provide a unified git diff (.patch format) to fix it.
-    # """
-    
-    # # Invoke the agent!
-    # response = await agent.ainvoke({"messages": [("user", prompt)]})
+    # Slice the output to only return the newly generated tokens
+    input_length = inputs.input_ids.shape[1]
+    final_response = llm_tokenizer.decode(outputs[0][input_length:], skip_special_tokens=True)
     
     print("\n=== AI RESPONSE ===")
-    print(response["messages"][-1].content)
-    print("===================\n")
-    
-    return response["messages"][-1].content
+    print(final_response)
+    return final_response
 
 @celery_app.task(bind=True, name="process_github_webhook")
 def process_github_webhook(self, repo_name: str, clone_url: str, git_ref: str):
     print(f"[Worker] Initiating pipeline for {repo_name}...")
     
-    # --- PHASE 1: THE SANDBOX ---
+    # Simulating a failed test run
     test_command = "python missing_file.py" 
-    
-    print(f"[Worker] Sending code to isolated sandbox...")
     sandbox_result = run_code_in_sandbox(repo_url=clone_url, command=test_command)
     
-    if sandbox_result["success"]:
-        print("[Worker] Code executed perfectly! No AI patch needed.")
-        return {"status": "success", "repo": repo_name}
-    else:
+    if not sandbox_result["success"]:
         print(f"[Worker] Build failed! Exit code: {sandbox_result['exit_code']}")
-        print(f"[Worker] Handing logs to AI Agent via MCP...")
-        
-        # --- PHASE 2: MCP & LLM Agent ---
-        # Since Celery runs synchronous tasks, we need to run our async LangChain agent like this:
-        try:
-            # Note: This requires an OPENAI_API_KEY environment variable to work!
-            loop = asyncio.get_event_loop()
-            ai_patch = loop.run_until_complete(run_ai_agent(sandbox_result["logs"]))
-            
-            return {"status": "patched", "repo": repo_name, "patch": ai_patch}
-            
-        except Exception as e:
-            print(f"[Worker] Agent failed: {str(e)}")
-            return {"status": "error", "repo": repo_name, "error": str(e)}
+        print("[Worker] Handing logs to AI Agent...")
+        ai_patch = run_ai_agent(sandbox_result["logs"])
+        return {"status": "patched", "patch": ai_patch}
+    
+    return {"status": "success"}
